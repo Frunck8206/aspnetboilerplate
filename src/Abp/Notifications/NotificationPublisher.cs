@@ -32,9 +32,7 @@ namespace Abp.Notifications
         private readonly INotificationStore _store;
         private readonly IBackgroundJobManager _backgroundJobManager;
         private readonly INotificationDistributer _notificationDistributer;
-        private readonly INotificationConfiguration _notificationConfiguration;
         private readonly IGuidGenerator _guidGenerator;
-        private readonly IIocResolver _iocResolver;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="NotificationPublisher"/> class.
@@ -43,21 +41,15 @@ namespace Abp.Notifications
             INotificationStore store,
             IBackgroundJobManager backgroundJobManager,
             INotificationDistributer notificationDistributer,
-            INotificationConfiguration notificationConfiguration,
-            IGuidGenerator guidGenerator,
-            IIocResolver iocResolver)
+            IGuidGenerator guidGenerator)
         {
             _store = store;
             _backgroundJobManager = backgroundJobManager;
             _notificationDistributer = notificationDistributer;
-            _notificationConfiguration = notificationConfiguration;
             _guidGenerator = guidGenerator;
-            _iocResolver = iocResolver;
             AbpSession = NullAbpSession.Instance;
         }
-
-        //Create EntityIdentifier includes entityType and entityId.
-        [UnitOfWork]
+        
         public virtual async Task PublishAsync(
             string notificationName,
             NotificationData data = null,
@@ -67,112 +59,57 @@ namespace Abp.Notifications
             UserIdentifier[] excludedUserIds = null,
             int?[] tenantIds = null)
         {
-            if (notificationName.IsNullOrEmpty())
+            using (var uow = UnitOfWorkManager.Begin())
             {
-                throw new ArgumentException("NotificationName can not be null or whitespace!", nameof(notificationName));
-            }
+                if (notificationName.IsNullOrEmpty())
+                {
+                    throw new ArgumentException("NotificationName can not be null or whitespace!", nameof(notificationName));
+                }
 
-            if (!tenantIds.IsNullOrEmpty() && !userIds.IsNullOrEmpty())
-            {
-                throw new ArgumentException("tenantIds can be set only if userIds is not set!", nameof(tenantIds));
-            }
+                if (!tenantIds.IsNullOrEmpty() && !userIds.IsNullOrEmpty())
+                {
+                    throw new ArgumentException("tenantIds can be set only if userIds is not set!", nameof(tenantIds));
+                }
 
-            if (tenantIds.IsNullOrEmpty() && userIds.IsNullOrEmpty())
-            {
-                tenantIds = new[] { AbpSession.TenantId };
-            }
+                if (tenantIds.IsNullOrEmpty() && userIds.IsNullOrEmpty())
+                {
+                    tenantIds = new[] { AbpSession.TenantId };
+                }
 
-            var notificationInfo = new NotificationInfo(_guidGenerator.Create())
-            {
-                NotificationName = notificationName,
-                EntityTypeName = entityIdentifier?.Type.FullName,
-                EntityTypeAssemblyQualifiedName = entityIdentifier?.Type.AssemblyQualifiedName,
-                EntityId = entityIdentifier?.Id.ToJsonString(),
-                Severity = severity,
-                UserIds = userIds.IsNullOrEmpty() ? null : userIds.Select(uid => uid.ToUserIdentifierString()).JoinAsString(","),
-                ExcludedUserIds = excludedUserIds.IsNullOrEmpty() ? null : excludedUserIds.Select(uid => uid.ToUserIdentifierString()).JoinAsString(","),
-                TenantIds = GetTenantIdsAsStr(tenantIds),
-                Data = data?.ToJsonString(),
-                DataTypeName = data?.GetType().AssemblyQualifiedName
-            };
+                var notificationInfo = new NotificationInfo(_guidGenerator.Create())
+                {
+                    NotificationName = notificationName,
+                    EntityTypeName = entityIdentifier?.Type.FullName,
+                    EntityTypeAssemblyQualifiedName = entityIdentifier?.Type.AssemblyQualifiedName,
+                    EntityId = entityIdentifier?.Id.ToJsonString(),
+                    Severity = severity,
+                    UserIds = userIds.IsNullOrEmpty() ? null : userIds.Select(uid => uid.ToUserIdentifierString()).JoinAsString(","),
+                    ExcludedUserIds = excludedUserIds.IsNullOrEmpty() ? null : excludedUserIds.Select(uid => uid.ToUserIdentifierString()).JoinAsString(","),
+                    TenantIds = GetTenantIdsAsStr(tenantIds),
+                    Data = data?.ToJsonString(),
+                    DataTypeName = data?.GetType().AssemblyQualifiedName
+                };
 
-            await _store.InsertNotificationAsync(notificationInfo);
+                await _store.InsertNotificationAsync(notificationInfo);
 
-            await CurrentUnitOfWork.SaveChangesAsync(); //To get Id of the notification
+                await CurrentUnitOfWork.SaveChangesAsync(); //To get Id of the notification
 
-            if (userIds != null && userIds.Length <= MaxUserCountToDirectlyDistributeANotification)
-            {
-                //We can directly distribute the notification since there are not much receivers
-                await _notificationDistributer.DistributeAsync(notificationInfo.Id);
-            }
-            else
-            {
-                //We enqueue a background job since distributing may get a long time
-                await _backgroundJobManager.EnqueueAsync<NotificationDistributionJob, NotificationDistributionJobArgs>(
-                    new NotificationDistributionJobArgs(
-                        notificationInfo.Id
+                if (userIds != null && userIds.Length <= MaxUserCountToDirectlyDistributeANotification)
+                {
+                    //We can directly distribute the notification since there are not much receivers
+                    await _notificationDistributer.DistributeAsync(notificationInfo.Id);
+                }
+                else
+                {
+                    //We enqueue a background job since distributing may get a long time
+                    await _backgroundJobManager.EnqueueAsync<NotificationDistributionJob, NotificationDistributionJobArgs>(
+                        new NotificationDistributionJobArgs(
+                            notificationInfo.Id
                         )
                     );
-            }
-        }
-
-        //Create EntityIdentifier includes entityType and entityId.
-        [UnitOfWork]
-        public virtual void Publish(
-            string notificationName,
-            NotificationData data = null,
-            EntityIdentifier entityIdentifier = null,
-            NotificationSeverity severity = NotificationSeverity.Info,
-            UserIdentifier[] userIds = null,
-            UserIdentifier[] excludedUserIds = null,
-            int?[] tenantIds = null)
-        {
-            if (notificationName.IsNullOrEmpty())
-            {
-                throw new ArgumentException("NotificationName can not be null or whitespace!", nameof(notificationName));
-            }
-
-            if (!tenantIds.IsNullOrEmpty() && !userIds.IsNullOrEmpty())
-            {
-                throw new ArgumentException("tenantIds can be set only if userIds is not set!", nameof(tenantIds));
-            }
-
-            if (tenantIds.IsNullOrEmpty() && userIds.IsNullOrEmpty())
-            {
-                tenantIds = new[] { AbpSession.TenantId };
-            }
-
-            var notificationInfo = new NotificationInfo(_guidGenerator.Create())
-            {
-                NotificationName = notificationName,
-                EntityTypeName = entityIdentifier?.Type.FullName,
-                EntityTypeAssemblyQualifiedName = entityIdentifier?.Type.AssemblyQualifiedName,
-                EntityId = entityIdentifier?.Id.ToJsonString(),
-                Severity = severity,
-                UserIds = userIds.IsNullOrEmpty() ? null : userIds.Select(uid => uid.ToUserIdentifierString()).JoinAsString(","),
-                ExcludedUserIds = excludedUserIds.IsNullOrEmpty() ? null : excludedUserIds.Select(uid => uid.ToUserIdentifierString()).JoinAsString(","),
-                TenantIds = GetTenantIdsAsStr(tenantIds),
-                Data = data?.ToJsonString(),
-                DataTypeName = data?.GetType().AssemblyQualifiedName
-            };
-
-            _store.InsertNotification(notificationInfo);
-
-            CurrentUnitOfWork.SaveChanges(); //To get Id of the notification
-
-            if (userIds != null && userIds.Length <= MaxUserCountToDirectlyDistributeANotification)
-            {
-                //We can directly distribute the notification since there are not much receivers
-                _notificationDistributer.Distribute(notificationInfo.Id);
-            }
-            else
-            {
-                //We enqueue a background job since distributing may get a long time
-                _backgroundJobManager.Enqueue<NotificationDistributionJob, NotificationDistributionJobArgs>(
-                   new NotificationDistributionJobArgs(
-                       notificationInfo.Id
-                       )
-                   );
+                }
+                
+                await uow.CompleteAsync();
             }
         }
 
